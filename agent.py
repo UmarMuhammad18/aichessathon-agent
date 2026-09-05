@@ -1,13 +1,7 @@
-"""AI Chessathon agent v3 - stronger search, fewer soft draws, more wins.
+"""AI Chessathon agent v4 - stable strength (conservative search).
 
-On top of v2:
-  - Null-move pruning
-  - Reverse futility + razoring at shallow depths
-  - Higher contempt + stricter root anti-repetition
-  - Simple SEE for capture ordering
-  - Passed-pawn bonuses
-  - Safer but fuller use of the clock
-  - History gravity so quiet ordering stays useful
+Keeps reliable alpha-beta + eval upgrades.
+Removes aggressive null-move / heavy LMR / sharp futility that can miss tactics.
 """
 
 from __future__ import annotations
@@ -17,20 +11,13 @@ from typing import Optional
 
 import chess
 
-MATE = 30_000
-DRAW = 0
-INF = 40_000
-CONTEMPT = 35
+MATE, DRAW, INF = 30_000, 0, 40_000
+CONTEMPT = 28
 
 PIECE_VALUE = {
-    chess.PAWN: 100,
-    chess.KNIGHT: 320,
-    chess.BISHOP: 330,
-    chess.ROOK: 500,
-    chess.QUEEN: 900,
-    chess.KING: 0,
+    chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330,
+    chess.ROOK: 500, chess.QUEEN: 900, chess.KING: 0,
 }
-
 _MVV = [[0] * 7 for _ in range(7)]
 for v in range(1, 7):
     for a in range(1, 7):
@@ -59,7 +46,7 @@ PST = {
 PHASE_W = {chess.PAWN: 0, chess.KNIGHT: 1, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 4, chess.KING: 0}
 MAX_PHASE = 24
 TT_EXACT, TT_LOWER, TT_UPPER = 0, 1, 2
-TT_MAX = 1 << 19
+TT_MAX = 1 << 18
 _tt = {}
 _killers = [[None, None] for _ in range(128)]
 _history = [[0] * 64 for _ in range(64)]
@@ -92,29 +79,15 @@ def _record_history(move, depth):
     h = _history[move.from_square][move.to_square] + depth * depth
     _history[move.from_square][move.to_square] = min(h, 1_000_000)
 
-def _is_passed_pawn(board, sq, color):
-    f, r = chess.square_file(sq), chess.square_rank(sq)
-    if color == chess.WHITE:
-        for rf in range(max(0, f - 1), min(7, f + 1) + 1):
-            for rr in range(r + 1, 8):
-                p = board.piece_at(chess.square(rf, rr))
-                if p is not None and p.piece_type == chess.PAWN and p.color == chess.BLACK:
-                    return False
-        return True
-    for rf in range(max(0, f - 1), min(7, f + 1) + 1):
-        for rr in range(0, r):
-            p = board.piece_at(chess.square(rf, rr))
-            if p is not None and p.piece_type == chess.PAWN and p.color == chess.WHITE:
-                return False
-    return True
-
 def evaluate(board):
     if board.is_checkmate(): return -MATE
     if board.is_stalemate() or board.is_insufficient_material(): return DRAW
     mg, eg, phase = [0, 0], [0, 0], 0
-    bishops, pawns_file = [0, 0], [[0] * 8, [0] * 8]
+    bishops = [0, 0]
+    pawns_f = [[0] * 8, [0] * 8]
     for sq, pc in board.piece_map().items():
-        pt, col = pc.piece_type, (0 if pc.color == chess.WHITE else 1)
+        pt = pc.piece_type
+        col = 0 if pc.color == chess.WHITE else 1
         val = PIECE_VALUE[pt]
         mw, ew, mb, eb = PST[pt]
         if col == 0:
@@ -122,35 +95,22 @@ def evaluate(board):
         else:
             mg[1] += val + mb[sq]; eg[1] += val + eb[sq]
         if pt == chess.BISHOP: bishops[col] += 1
-        if pt == chess.PAWN:
-            pawns_file[col][chess.square_file(sq)] += 1
-            if _is_passed_pawn(board, sq, pc.color):
-                rank = chess.square_rank(sq)
-                bonus = (rank if pc.color == chess.WHITE else 7 - rank) * 12
-                eg[col] += bonus; mg[col] += bonus // 2
+        if pt == chess.PAWN: pawns_f[col][chess.square_file(sq)] += 1
         phase += PHASE_W[pt]
-    if bishops[0] >= 2: mg[0] += 35; eg[0] += 50
-    if bishops[1] >= 2: mg[1] += 35; eg[1] += 50
+    if bishops[0] >= 2: mg[0] += 30; eg[0] += 45
+    if bishops[1] >= 2: mg[1] += 30; eg[1] += 45
     for f in range(8):
-        if pawns_file[0][f] > 1:
-            mg[0] -= 14 * (pawns_file[0][f] - 1); eg[0] -= 22 * (pawns_file[0][f] - 1)
-        if pawns_file[1][f] > 1:
-            mg[1] -= 14 * (pawns_file[1][f] - 1); eg[1] -= 22 * (pawns_file[1][f] - 1)
+        if pawns_f[0][f] > 1:
+            mg[0] -= 12 * (pawns_f[0][f] - 1); eg[0] -= 20 * (pawns_f[0][f] - 1)
+        if pawns_f[1][f] > 1:
+            mg[1] -= 12 * (pawns_f[1][f] - 1); eg[1] -= 20 * (pawns_f[1][f] - 1)
     phase = min(phase, MAX_PHASE)
     score = ((mg[0] - mg[1]) * phase + (eg[0] - eg[1]) * (MAX_PHASE - phase)) // MAX_PHASE
-    score += 12 if board.turn == chess.WHITE else -12
+    score += 10 if board.turn == chess.WHITE else -10
     stm = score if board.turn == chess.WHITE else -score
-    if stm > 60: stm += CONTEMPT
-    elif stm < -60: stm -= CONTEMPT
+    if stm > 70: stm += CONTEMPT
+    elif stm < -70: stm -= CONTEMPT
     return stm
-
-def _see_value(board, move):
-    if not board.is_capture(move) and not move.promotion: return 0
-    vic = board.piece_type_at(move.to_square)
-    gain = PIECE_VALUE.get(vic, 100) if vic else (100 if board.is_en_passant(move) else 0)
-    att = board.piece_type_at(move.from_square) or chess.PAWN
-    if move.promotion: gain += PIECE_VALUE.get(move.promotion, 800) - PIECE_VALUE[chess.PAWN]
-    return gain - PIECE_VALUE.get(att, 100) // 4
 
 def order_moves(board, moves, tt_move, ply=0):
     scored = []
@@ -158,10 +118,11 @@ def order_moves(board, moves, tt_move, ply=0):
     k1 = _killers[ply][1] if ply < len(_killers) else None
     for m in moves:
         if m == tt_move: scored.append((1_000_000, m)); continue
-        if board.is_capture(m) or m.promotion:
+        if board.is_capture(m):
             vic = board.piece_type_at(m.to_square) or chess.PAWN
             att = board.piece_type_at(m.from_square) or chess.PAWN
-            scored.append((100_000 + _see_value(board, m) * 10 + _MVV[vic][att], m))
+            scored.append((100_000 + _MVV[vic][att] * 100, m))
+        elif m.promotion: scored.append((90_000 + m.promotion, m))
         elif m == k0: scored.append((80_000, m))
         elif m == k1: scored.append((70_000, m))
         else: scored.append((_history[m.from_square][m.to_square], m))
@@ -179,8 +140,13 @@ def qsearch(board, alpha, beta):
     if board.is_check():
         moves = list(board.legal_moves)
     else:
-        raw = [m for m in board.legal_moves if board.is_capture(m) or m.promotion]
-        moves = [m for m in raw if stand + max(0, _see_value(board, m)) + 450 >= alpha]
+        moves = []
+        for m in board.legal_moves:
+            if not (board.is_capture(m) or m.promotion): continue
+            vic = board.piece_type_at(m.to_square)
+            gain = PIECE_VALUE.get(vic, 100) if vic else 100
+            if m.promotion: gain += PIECE_VALUE.get(m.promotion, 800) - 100
+            if stand + gain + 180 >= alpha: moves.append(m)
     for m in order_moves(board, moves, None, 0):
         board.push(m); s = -qsearch(board, -beta, -alpha); board.pop()
         if _stop: return alpha
@@ -188,7 +154,7 @@ def qsearch(board, alpha, beta):
         if s > alpha: alpha = s
     return alpha
 
-def negamax(board, depth, alpha, beta, ply, do_null=True):
+def negamax(board, depth, alpha, beta, ply):
     global _nodes, _stop
     _nodes += 1
     if time.perf_counter() >= _deadline:
@@ -198,21 +164,8 @@ def negamax(board, depth, alpha, beta, ply, do_null=True):
     hit, tt_mv = tt_get(key, depth, alpha, beta)
     if hit is not None: return hit
     in_check = board.is_check()
-    if in_check: depth += 1
+    if in_check and depth > 0: depth += 1
     if depth <= 0: return qsearch(board, alpha, beta)
-    static = evaluate(board)
-    if depth <= 3 and not in_check and abs(beta) < MATE - 1000 and static - 120 * depth >= beta:
-        return static
-    if depth <= 2 and not in_check and static + 250 * depth <= alpha:
-        return qsearch(board, alpha, beta)
-    if do_null and depth >= 3 and not in_check and static >= beta and any(
-        p.piece_type not in (chess.PAWN, chess.KING) for p in board.piece_map().values() if p.color == board.turn):
-        board.push(chess.Move.null())
-        R = 2 + (1 if depth >= 6 else 0)
-        s = -negamax(board, depth - 1 - R, -beta, -beta + 1, ply + 1, False)
-        board.pop()
-        if _stop: return alpha
-        if s >= beta: return s if abs(s) < MATE - 1000 else beta
     moves = list(board.legal_moves)
     if not moves: return -MATE + ply if in_check else DRAW
     moves = order_moves(board, moves, tt_mv, ply)
@@ -221,14 +174,16 @@ def negamax(board, depth, alpha, beta, ply, do_null=True):
         is_cap = board.is_capture(m) or m.promotion
         board.push(m)
         gives_chk = board.is_check()
-        reduced = False
-        if depth >= 3 and i >= 3 and not in_check and not is_cap and not gives_chk:
-            red = 1 + (1 if i >= 6 and depth >= 5 else 0)
-            s = -negamax(board, depth - 1 - red, -alpha - 1, -alpha, ply + 1)
-            reduced = True
+        if depth >= 4 and i >= 5 and not in_check and not is_cap and not gives_chk:
+            s = -negamax(board, depth - 2, -alpha - 1, -alpha, ply + 1)
+            if s > alpha:
+                if i == 0:
+                    s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
+                else:
+                    s = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
+                    if alpha < s < beta:
+                        s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
         else:
-            s = -INF
-        if not reduced or s > alpha:
             if i == 0:
                 s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
             else:
@@ -251,19 +206,19 @@ def negamax(board, depth, alpha, beta, ply, do_null=True):
 def search_root(board, time_ms):
     global _nodes, _deadline, _stop
     _nodes, _stop = 0, False
-    soft = time_ms * 0.85 / 1000.0
-    hard = max(0.06, (time_ms - 40) / 1000.0)
+    soft = time_ms * 0.80 / 1000.0
+    hard = max(0.06, (time_ms - 50) / 1000.0)
     t0 = time.perf_counter(); _deadline = t0 + hard
     moves = list(board.legal_moves)
     if not moves: return chess.Move.null()
     if len(moves) == 1: return moves[0]
     static = evaluate(board)
     candidates = moves
-    if static > 40:
+    if static > 50:
         non_rep = []
         for m in moves:
             board.push(m)
-            rep = board.can_claim_threefold_repetition() or board.is_repetition(2)
+            rep = board.is_repetition(2)
             board.pop()
             if not rep: non_rep.append(m)
         if non_rep: candidates = non_rep
@@ -271,8 +226,8 @@ def search_root(board, time_ms):
     key = board._transposition_key()
     _, tt_mv = tt_get(key, 0, -INF, INF)
     if tt_mv is not None and tt_mv in candidates: best = tt_mv
-    window = 50
-    for depth in range(1, 64):
+    window = 45
+    for depth in range(1, 48):
         if time.perf_counter() - t0 >= soft and depth > 3: break
         _stop = False
         ordered = order_moves(board, candidates, best, 0)
@@ -281,7 +236,7 @@ def search_root(board, time_ms):
         else:
             a, b = -INF, INF
         root_best, root_score = ordered[0], -INF
-        fail_low = fail_high = False
+        failed = False
         for i, m in enumerate(ordered):
             board.push(m)
             if i == 0:
@@ -294,25 +249,24 @@ def search_root(board, time_ms):
             if s > root_score:
                 root_score, root_best = s, m
                 a = max(a, s)
-            if depth >= 3:
-                if s <= static - window: fail_low = True
-                if s >= static + window: fail_high = True
+            if depth >= 3 and (s <= static - window or s >= static + window):
+                failed = True
         if not _stop:
             best = root_best
             static = root_score
             if abs(root_score) > MATE - 500: break
-            window = min(500, window * 2) if (fail_low or fail_high) else 50
+            window = min(350, window * 2) if failed else 45
         else:
             break
         if time.perf_counter() - t0 >= soft: break
     return best
 
 def allocate_time(time_left_ms, move_n):
-    usable = max(0, time_left_ms - 120)
-    expected = max(6, 24 - move_n // 2)
+    usable = max(0, time_left_ms - 150)
+    expected = max(8, 26 - move_n // 2)
     budget = usable // expected
-    budget = min(budget, max(150, usable // 5))
-    return max(150, min(budget, 15_000))
+    budget = min(budget, max(120, usable // 6))
+    return max(120, min(budget, 12_000))
 
 def get_move(fen: str, time_left_ms: int) -> str:
     global _move_n
