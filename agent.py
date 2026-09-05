@@ -1,7 +1,8 @@
-"""AI Chessathon agent v4 - stable strength (conservative search).
+"""AI Chessathon agent v5 - simple proven search (rollback to stable style).
 
-Keeps reliable alpha-beta + eval upgrades.
-Removes aggressive null-move / heavy LMR / sharp futility that can miss tactics.
+Day-1 v1 scored ~50%. v3/v4 over-pruned and collapsed.
+Clean iterative deepening + alpha-beta + quiescence + PST + TT.
+No null-move, no LMR, no sharp futility. Safe time margins.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from typing import Optional
 import chess
 
 MATE, DRAW, INF = 30_000, 0, 40_000
-CONTEMPT = 28
 
 PIECE_VALUE = {
     chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330,
@@ -25,10 +25,10 @@ for v in range(1, 7):
 
 PST_P_MG = [0,0,0,0,0,0,0,0,50,50,50,50,50,50,50,50,10,10,20,30,30,20,10,10,5,5,10,25,25,10,5,5,0,0,0,20,20,0,0,0,5,-5,-10,0,0,-10,-5,5,5,10,10,-20,-20,10,10,5,0,0,0,0,0,0,0,0]
 PST_P_EG = [0,0,0,0,0,0,0,0,80,80,80,80,80,80,80,80,50,50,50,50,50,50,50,50,30,30,30,30,30,30,30,30,20,20,20,20,20,20,20,20,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,10,0,0,0,0,0,0,0,0]
-PST_N = [-50,-40,-30,-30,-30,-30,-40,-50,-40,-20,0,5,5,0,-20,-40,-30,5,10,15,15,10,5,-30,-30,0,15,20,20,15,0,-30,-30,5,15,20,20,15,5,-30,-30,0,10,15,15,10,0,-30,-40,-20,0,0,0,0,-20,-40,-50,-40,-30,-30,-30,-30,-40,-50]
-PST_B = [-20,-10,-10,-10,-10,-10,-10,-20,-10,5,0,0,0,0,5,-10,-10,10,10,10,10,10,10,-10,-10,0,10,10,10,10,0,-10,-10,5,5,10,10,5,5,-10,-10,0,5,10,10,5,0,-10,-10,0,0,0,0,0,0,-10,-20,-10,-10,-10,-10,-10,-10,-20]
-PST_R = [0,0,0,5,5,0,0,0,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,5,10,10,10,10,10,10,5,0,0,0,0,0,0,0,0]
-PST_Q = [-20,-10,-10,-5,-5,-10,-10,-20,-10,0,5,0,0,0,0,-10,-10,5,5,5,5,5,0,-10,0,0,5,5,5,5,0,-5,-5,0,5,5,5,5,0,-5,-10,0,5,5,5,5,0,-10,-10,0,0,0,0,0,0,-10,-20,-10,-10,-5,-5,-10,-10,-20]
+PST_N = [-50,-40,-30,-30,-30,-30,-40,-50,-40,-20,0,0,0,0,-20,-40,-30,0,10,15,15,10,0,-30,-30,5,15,20,20,15,5,-30,-30,0,15,20,20,15,0,-30,-30,5,10,15,15,10,5,-30,-40,-20,0,5,5,0,-20,-40,-50,-40,-30,-30,-30,-30,-40,-50]
+PST_B = [-20,-10,-10,-10,-10,-10,-10,-20,-10,0,0,0,0,0,0,-10,-10,0,5,10,10,5,0,-10,-10,5,5,10,10,5,5,-10,-10,0,10,10,10,10,0,-10,-10,10,10,10,10,10,10,-10,-10,5,0,0,0,0,5,-10,-20,-10,-10,-10,-10,-10,-10,-20]
+PST_R = [0,0,0,0,0,0,0,0,5,10,10,10,10,10,10,5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,-5,0,0,0,0,0,0,-5,0,0,0,5,5,0,0,0]
+PST_Q = [-20,-10,-10,-5,-5,-10,-10,-20,-10,0,0,0,0,0,0,-10,-10,0,5,5,5,5,0,-10,-5,0,5,5,5,5,0,-5,0,0,5,5,5,5,0,-5,-10,5,5,5,5,5,0,-10,-10,0,5,0,0,0,0,-10,-20,-10,-10,-5,-5,-10,-10,-20]
 PST_K_MG = [-30,-40,-40,-50,-50,-40,-40,-30,-30,-40,-40,-50,-50,-40,-40,-30,-30,-40,-40,-50,-50,-40,-40,-30,-30,-40,-40,-50,-50,-40,-40,-30,-20,-30,-30,-40,-40,-30,-30,-20,-10,-20,-20,-20,-20,-20,-20,-10,20,20,0,0,0,0,20,20,20,30,10,0,0,10,30,20]
 PST_K_EG = [-50,-40,-30,-20,-20,-30,-40,-50,-30,-20,-10,0,0,-10,-20,-30,-30,-10,20,30,30,20,-10,-30,-30,-10,30,40,40,30,-10,-30,-30,-10,30,40,40,30,-10,-30,-30,-10,20,30,30,20,-10,-30,-30,-30,0,0,0,0,-30,-30,-50,-30,-30,-30,-30,-30,-30,-50]
 
@@ -48,8 +48,6 @@ MAX_PHASE = 24
 TT_EXACT, TT_LOWER, TT_UPPER = 0, 1, 2
 TT_MAX = 1 << 18
 _tt = {}
-_killers = [[None, None] for _ in range(128)]
-_history = [[0] * 64 for _ in range(64)]
 _nodes = 0
 _deadline = 0.0
 _stop = False
@@ -69,22 +67,10 @@ def tt_put(key, depth, score, flag, mv):
     if len(_tt) > TT_MAX: _tt.clear()
     _tt[key] = (depth, score, flag, mv)
 
-def _record_killer(ply, move):
-    if ply >= len(_killers): return
-    if _killers[ply][0] != move:
-        _killers[ply][1] = _killers[ply][0]
-        _killers[ply][0] = move
-
-def _record_history(move, depth):
-    h = _history[move.from_square][move.to_square] + depth * depth
-    _history[move.from_square][move.to_square] = min(h, 1_000_000)
-
 def evaluate(board):
     if board.is_checkmate(): return -MATE
     if board.is_stalemate() or board.is_insufficient_material(): return DRAW
     mg, eg, phase = [0, 0], [0, 0], 0
-    bishops = [0, 0]
-    pawns_f = [[0] * 8, [0] * 8]
     for sq, pc in board.piece_map().items():
         pt = pc.piece_type
         col = 0 if pc.color == chess.WHITE else 1
@@ -94,38 +80,24 @@ def evaluate(board):
             mg[0] += val + mw[sq]; eg[0] += val + ew[sq]
         else:
             mg[1] += val + mb[sq]; eg[1] += val + eb[sq]
-        if pt == chess.BISHOP: bishops[col] += 1
-        if pt == chess.PAWN: pawns_f[col][chess.square_file(sq)] += 1
         phase += PHASE_W[pt]
-    if bishops[0] >= 2: mg[0] += 30; eg[0] += 45
-    if bishops[1] >= 2: mg[1] += 30; eg[1] += 45
-    for f in range(8):
-        if pawns_f[0][f] > 1:
-            mg[0] -= 12 * (pawns_f[0][f] - 1); eg[0] -= 20 * (pawns_f[0][f] - 1)
-        if pawns_f[1][f] > 1:
-            mg[1] -= 12 * (pawns_f[1][f] - 1); eg[1] -= 20 * (pawns_f[1][f] - 1)
     phase = min(phase, MAX_PHASE)
     score = ((mg[0] - mg[1]) * phase + (eg[0] - eg[1]) * (MAX_PHASE - phase)) // MAX_PHASE
-    score += 10 if board.turn == chess.WHITE else -10
-    stm = score if board.turn == chess.WHITE else -score
-    if stm > 70: stm += CONTEMPT
-    elif stm < -70: stm -= CONTEMPT
-    return stm
+    return score if board.turn == chess.WHITE else -score
 
-def order_moves(board, moves, tt_move, ply=0):
+def order_moves(board, moves, tt_move):
     scored = []
-    k0 = _killers[ply][0] if ply < len(_killers) else None
-    k1 = _killers[ply][1] if ply < len(_killers) else None
     for m in moves:
-        if m == tt_move: scored.append((1_000_000, m)); continue
+        if m == tt_move:
+            scored.append((10000, m)); continue
         if board.is_capture(m):
             vic = board.piece_type_at(m.to_square) or chess.PAWN
             att = board.piece_type_at(m.from_square) or chess.PAWN
-            scored.append((100_000 + _MVV[vic][att] * 100, m))
-        elif m.promotion: scored.append((90_000 + m.promotion, m))
-        elif m == k0: scored.append((80_000, m))
-        elif m == k1: scored.append((70_000, m))
-        else: scored.append((_history[m.from_square][m.to_square], m))
+            scored.append((1000 + _MVV[vic][att], m))
+        elif m.promotion:
+            scored.append((900 + m.promotion, m))
+        else:
+            scored.append((0, m))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [m for _, m in scored]
 
@@ -140,14 +112,8 @@ def qsearch(board, alpha, beta):
     if board.is_check():
         moves = list(board.legal_moves)
     else:
-        moves = []
-        for m in board.legal_moves:
-            if not (board.is_capture(m) or m.promotion): continue
-            vic = board.piece_type_at(m.to_square)
-            gain = PIECE_VALUE.get(vic, 100) if vic else 100
-            if m.promotion: gain += PIECE_VALUE.get(m.promotion, 800) - 100
-            if stand + gain + 180 >= alpha: moves.append(m)
-    for m in order_moves(board, moves, None, 0):
+        moves = [m for m in board.legal_moves if board.is_capture(m) or m.promotion]
+    for m in order_moves(board, moves, None):
         board.push(m); s = -qsearch(board, -beta, -alpha); board.pop()
         if _stop: return alpha
         if s >= beta: return beta
@@ -163,121 +129,83 @@ def negamax(board, depth, alpha, beta, ply):
     key = board._transposition_key()
     hit, tt_mv = tt_get(key, depth, alpha, beta)
     if hit is not None: return hit
-    in_check = board.is_check()
-    if in_check and depth > 0: depth += 1
     if depth <= 0: return qsearch(board, alpha, beta)
     moves = list(board.legal_moves)
-    if not moves: return -MATE + ply if in_check else DRAW
-    moves = order_moves(board, moves, tt_mv, ply)
+    if not moves: return -MATE + ply if board.is_check() else DRAW
+    moves = order_moves(board, moves, tt_mv)
     best, best_mv, flag = -INF, None, TT_UPPER
-    for i, m in enumerate(moves):
-        is_cap = board.is_capture(m) or m.promotion
+    for m in moves:
         board.push(m)
-        gives_chk = board.is_check()
-        if depth >= 4 and i >= 5 and not in_check and not is_cap and not gives_chk:
-            s = -negamax(board, depth - 2, -alpha - 1, -alpha, ply + 1)
-            if s > alpha:
-                if i == 0:
-                    s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
-                else:
-                    s = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
-                    if alpha < s < beta:
-                        s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
-        else:
-            if i == 0:
-                s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
-            else:
-                s = -negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
-                if alpha < s < beta:
-                    s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
+        s = -negamax(board, depth - 1, -beta, -alpha, ply + 1)
         board.pop()
         if _stop: return alpha
         if s > best: best, best_mv = s, m
         if s > alpha:
             alpha, flag = s, TT_EXACT
             if alpha >= beta:
-                flag = TT_LOWER
-                if not is_cap:
-                    _record_killer(ply, m); _record_history(m, depth)
-                break
+                flag = TT_LOWER; break
     tt_put(key, depth, best, flag, best_mv)
     return best
 
 def search_root(board, time_ms):
     global _nodes, _deadline, _stop
     _nodes, _stop = 0, False
-    soft = time_ms * 0.80 / 1000.0
-    hard = max(0.06, (time_ms - 50) / 1000.0)
+    soft = time_ms * 0.65 / 1000.0
+    hard = max(0.05, (time_ms - 80) / 1000.0)
     t0 = time.perf_counter(); _deadline = t0 + hard
     moves = list(board.legal_moves)
     if not moves: return chess.Move.null()
     if len(moves) == 1: return moves[0]
-    static = evaluate(board)
-    candidates = moves
-    if static > 50:
-        non_rep = []
-        for m in moves:
-            board.push(m)
-            rep = board.is_repetition(2)
-            board.pop()
-            if not rep: non_rep.append(m)
-        if non_rep: candidates = non_rep
-    best = candidates[0]
+    best = moves[0]
     key = board._transposition_key()
     _, tt_mv = tt_get(key, 0, -INF, INF)
-    if tt_mv is not None and tt_mv in candidates: best = tt_mv
-    window = 45
-    for depth in range(1, 48):
-        if time.perf_counter() - t0 >= soft and depth > 3: break
+    if tt_mv is not None and tt_mv in moves: best = tt_mv
+    for depth in range(1, 40):
+        if time.perf_counter() - t0 >= soft and depth > 2: break
         _stop = False
-        ordered = order_moves(board, candidates, best, 0)
-        if depth >= 3 and abs(static) < MATE - 1000:
-            a, b = static - window, static + window
-        else:
-            a, b = -INF, INF
-        root_best, root_score = ordered[0], -INF
-        failed = False
+        ordered = order_moves(board, moves, best)
+        root_best, root_score, alpha = ordered[0], -INF, -INF
         for i, m in enumerate(ordered):
             board.push(m)
             if i == 0:
-                s = -negamax(board, depth - 1, -b, -a, 1)
+                s = -negamax(board, depth - 1, -INF, -alpha, 1)
             else:
-                s = -negamax(board, depth - 1, -a - 1, -a, 1)
-                if s > a: s = -negamax(board, depth - 1, -b, -a, 1)
+                s = -negamax(board, depth - 1, -alpha - 1, -alpha, 1)
+                if s > alpha:
+                    s = -negamax(board, depth - 1, -INF, -alpha, 1)
             board.pop()
             if _stop: break
             if s > root_score:
-                root_score, root_best = s, m
-                a = max(a, s)
-            if depth >= 3 and (s <= static - window or s >= static + window):
-                failed = True
+                root_score, root_best, alpha = s, m, s
         if not _stop:
             best = root_best
-            static = root_score
             if abs(root_score) > MATE - 500: break
-            window = min(350, window * 2) if failed else 45
         else:
             break
         if time.perf_counter() - t0 >= soft: break
     return best
 
 def allocate_time(time_left_ms, move_n):
-    usable = max(0, time_left_ms - 150)
-    expected = max(8, 26 - move_n // 2)
+    usable = max(0, time_left_ms - 200)
+    expected = max(12, 32 - move_n // 2)
     budget = usable // expected
-    budget = min(budget, max(120, usable // 6))
-    return max(120, min(budget, 12_000))
+    budget = min(budget, usable // 10)
+    return max(100, min(budget, 8000))
 
 def get_move(fen: str, time_left_ms: int) -> str:
     global _move_n
     board = chess.Board(fen)
     _move_n += 1
     if not board.legal_moves: return "0000"
-    if time_left_ms < 150:
+    if time_left_ms < 200:
         for m in board.legal_moves:
-            if board.is_capture(m) or m.promotion or board.gives_check(m): return m.uci()
+            if board.is_capture(m) or m.promotion or board.gives_check(m):
+                return m.uci()
         return next(iter(board.legal_moves)).uci()
-    return search_root(board, allocate_time(time_left_ms, _move_n)).uci()
+    mv = search_root(board, allocate_time(time_left_ms, _move_n))
+    if mv not in board.legal_moves:
+        return next(iter(board.legal_moves)).uci()
+    return mv.uci()
 
 _ = evaluate(chess.Board())
-_ = order_moves(chess.Board(), list(chess.Board().legal_moves), None, 0)
+_ = order_moves(chess.Board(), list(chess.Board().legal_moves), None)
