@@ -2,7 +2,6 @@
 
 Classical search agent for [AI Chessathon](https://aichessathon.com) (Optiver / Encode Club).
 
-**Separate** from the C++20/SDL2 UCI engine in `UmarMuhammad18/Chess`.
 
 ## Quick start
 
